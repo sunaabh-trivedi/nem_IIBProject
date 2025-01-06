@@ -340,6 +340,29 @@ class ENDEMLitModule(DEMLitModule):
             self.log("train/fpe_residual_low", low_noise_mean, on_step=False, on_epoch=True)
             self.log("train/fpe_residual_medium", medium_noise_mean, on_step=False, on_epoch=True)
             self.log("train/fpe_residual_high", high_noise_mean, on_step=False, on_epoch=True)        
+
+            wandb_logger = get_wandb_logger(self.loggers)
+            if wandb_logger:
+                # Generate bin centers for plotting (midpoints of bin edges)
+                bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+
+                # Plot histogram of the binned residual means
+                fig, ax = plt.subplots(figsize=(6, 4))
+                ax.bar(bin_centers.detach().cpu().numpy(), 
+                    binned_residuals.detach().cpu().numpy(), 
+                    width=(1 / num_bins), alpha=0.7, edgecolor='black')
+
+                ax.set_title("FPE Residuals Stratified by Time")
+                ax.set_xlabel("Time (Bin Centers)")
+                ax.set_ylabel("Residual Mean")
+                ax.grid(True)
+
+                # Convert figure to image for WandB
+                image = fig_to_image(fig)
+                wandb_logger.log_image("train/fpe_residual", [image])
+                plt.close(fig)
+            else:
+                print("WandB logger not found!")
         
         bootstrap_stage = 1 if self.bootstrap_from_checkpoint else 0
         
