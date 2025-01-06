@@ -1,0 +1,48 @@
+_target_: dem.models.pis_module.PISLitModule
+
+optimizer:
+  _target_: torch.optim.Adam
+  _partial_: true
+  lr: 1e-3
+  weight_decay: 1e-7
+
+scheduler:
+  _target_: torch.optim.lr_scheduler.ReduceLROnPlateau
+  _partial_: true
+  mode: min
+  factor: 0.1
+  patience: 10
+
+defaults:
+  - net:
+      - mlp
+
+
+noise_schedule:
+  _target_: dem.models.components.noise_schedules.GeometricNoiseSchedule
+  sigma_min: 0.0001
+
+tnet:
+  _target_: dem.models.components.mlp.TimeConder
+  _partial_: true
+  channel: 32
+  out_dim: 1
+  num_layers: 2
+
+
+num_samples_to_generate_per_epoch: 1024
+eval_batch_size: 1024
+
+num_integration_steps: 100
+
+lr_scheduler_update_frequency: ${trainer.check_val_every_n_epoch}
+
+# compile model for faster training with pytorch 2.0
+compile: false
+
+use_ema: false
+
+pis_scale: 1.
+time_range: 1.
+
+num_samples_to_save: 100000
