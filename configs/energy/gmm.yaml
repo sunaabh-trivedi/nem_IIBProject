@@ -12,5 +12,5 @@ plot_samples_epoch_period: 1
 should_unnormalize: true
 data_normalization_factor: 50
 
-# data_path_train: C:\Users\tsuna\Documents\Uni\IIB\Project\nem\gmm\samples_1_100000.pt
-# data_path_val: ${energy.data_path_train}
+#data_path_train: "<YOURPATH>/samples_100000.pt"
+#data_path_val: ${energy.data_path_train}
