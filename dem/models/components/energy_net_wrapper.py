@@ -25,11 +25,15 @@ class EnergyNet(nn.Module):
         self.max_iter = max_iter
         self.score_clipper = None
 
-    def forward_e(self, t, y):
+    def forward_e(self, t, y, use_gt_score=True):
         score = self.score_net(t, y)
+
         if not self.energy_function.is_molecule:
             energy = - torch.linalg.vector_norm(score, dim=-1) + score.sum(-1) + self.c
-            return energy.unsqueeze(-1)
+            if use_gt_score:
+                return (1-t.unsqueeze(-1))*energy.unsqueeze(-1) + t.unsqueeze(-1)*self.energy_function(y)
+            else:
+                return energy.unsqueeze(-1)
         else:
             score, potential = score
             score = score.view(score.shape[0], 
@@ -37,7 +41,11 @@ class EnergyNet(nn.Module):
                                self.energy_function.n_spatial_dim)
             potential = potential.view(score.shape[0], 
                                self.energy_function.n_particles, -1)
-            return - torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)
+            if use_gt_score:
+                return (1-t.unsqueeze(-1))(- torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)) + t.unsqueeze(-1)*self.energy_function(y)
+            else:
+                return - torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)
+
     
     def forward(self, t: torch.Tensor, x: torch.Tensor, 
                 with_grad=False, return_E=False) -> torch.Tensor:

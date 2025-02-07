@@ -684,9 +684,6 @@ class DEMLitModule(LightningModule):
             self._log_dist_total_var(prefix=prefix)
         elif self.energy_function.dimensionality <= 2:
             self._log_data_total_var(prefix=prefix)            
-            
-
-    import numpy as np
 
     def _log_energy_w2(self, prefix="val"):
         if prefix == "test":
@@ -704,8 +701,7 @@ class DEMLitModule(LightningModule):
             if len(self.buffer) < self.eval_batch_size:
                 return
             data_set = self.energy_function.sample_test_set(self.eval_batch_size)
-            generated_samples, generated_energies = self.buffer.get_last_n_inserted(self.eval_batch_size)
-        
+            generated_samples, generated_energies = self.buffer.get_last_n_inserted(self.eval_batch_size)    
         energies = self.energy_function(self.energy_function.normalize(data_set)).sum(-1)
 
         # Ensure both arrays have the same length

@@ -196,31 +196,6 @@ class ENDEMLitModule(DEMLitModule):
     def sum_energy_estimator(self, e, num_samples):
         return torch.logsumexp(e, dim=1) - torch.log(torch.tensor(num_samples)).to(e.device) 
     
-    
-    def var_energy_estimator(self, xt, t, num_samples):
-        data_shape = list(xt.shape)[1:]
-        noise = torch.randn(xt.shape[0], num_samples, *data_shape).to(xt.device)
-
-        sigmas = self.noise_schedule.h(t).unsqueeze(1).sqrt()
-        x0_t = noise*sigmas.unsqueeze(-1) + xt.unsqueeze(1)
-
-        energies = self.energy_function(x0_t, smooth=True)
-
-        max_energy = energies.max()
-        shifted_energies = energies - max_energy
-
-        mean_shifted = torch.mean(torch.exp(shifted_energies))
-        var_shifted = torch.var(torch.exp(shifted_energies))
-
-        scale_factor = torch.exp(max_energy)
-        mean_exp = mean_shifted*scale_factor
-        var_exp = var_shifted*(scale_factor**2)
-
-        return 1/num_samples * (var_exp/mean_exp**2)
-    
-    def covariance_energy_estimator(self, xt, xs, t, u, num_samples):
-        pass
-    
     def bootstrap_energy_estimator(
             self, 
             xt: torch.Tensor, 
@@ -301,7 +276,46 @@ class ENDEMLitModule(DEMLitModule):
                                             self.energy_function,self.net.MH_sample)
         
         energy_est = self.energy_estimator(samples, times, self.num_estimator_mc_samples).detach()
-        predicted_energy = self.net.forward_e(times, samples)
+
+        with torch.enable_grad():
+
+            samples = samples.detach().requires_grad_(True)
+            times = times.detach().requires_grad_(True)
+
+            predicted_energy = self.net.forward_e(times, samples)
+
+            num_hutchinson_samples = 10
+            
+            time_derivative = torch.autograd.grad(
+                predicted_energy, 
+                times, 
+                grad_outputs=torch.ones_like(predicted_energy),
+                retain_graph=True,
+            )[0]
+    
+
+            grad_E = torch.autograd.grad(
+                predicted_energy, 
+                samples, 
+                grad_outputs=torch.ones_like(predicted_energy),
+                create_graph=True, 
+            )[0]
+
+            # Hutchinson's trick`
+            trace_hessian = torch.zeros(samples.shape[0], device=samples.device)
+            for _ in range(num_hutchinson_samples):
+                v = torch.randint(0, 2, samples.shape, device=samples.device, dtype=samples.dtype) * 2 - 1
+
+                Hv = torch.autograd.grad(
+                    outputs=(grad_E * v).sum(dim=-1),
+                    inputs=samples,
+                    grad_outputs=torch.ones(samples.shape[0], device=samples.device),
+                    retain_graph=True,
+                    create_graph=True,
+                )[0]
+                trace_hessian += (v * Hv).sum(dim=-1) 
+
+            trace_hessian /= num_hutchinson_samples
 
         if self.log_residual and self.global_step % 100 == 0:
 
@@ -348,8 +362,8 @@ class ENDEMLitModule(DEMLitModule):
 
                 # Plot histogram of the binned residual means
                 fig, ax = plt.subplots(figsize=(6, 4))
-                ax.bar(bin_centers.detach().cpu().numpy(), 
-                    binned_residuals.detach().cpu().numpy(), 
+                ax.bar(bin_centers[:-2].detach().cpu().numpy(), 
+                    binned_residuals[:-2].detach().cpu().numpy(), 
                     width=(1 / num_bins), alpha=0.7, edgecolor='black')
 
                 ax.set_title("FPE Residuals Stratified by Time")
@@ -369,66 +383,64 @@ class ENDEMLitModule(DEMLitModule):
         should_bootstrap = (self.bootstrap_scheduler is not None and train and self.train_stage == bootstrap_stage)
         if should_bootstrap:
             self.iden_t = True
-            with torch.no_grad():
-                t_loss = (self.sum_energy_estimator(energy_est, self.num_estimator_mc_samples) \
-                          - predicted_energy).pow(2).sum(-1) * self.lambda_weighter(times)
+            # with torch.no_grad():
+                # t_loss = (self.sum_energy_estimator(energy_est, self.num_estimator_mc_samples) \
+                #           - predicted_energy).pow(2).sum(-1) * self.lambda_weighter(times)
                 
-                if(isinstance(self.time_schedule, AnnealingSchedule)):
-                    self.bootstrap_scheduler.time_spliter(self.time_schedule) # This is needed because the time split needs to be recomputed every so often for the annealing schedule
+                # if(isinstance(self.time_schedule, AnnealingSchedule)):
+                #     self.bootstrap_scheduler.time_spliter(self.time_schedule) # This is needed because the time split needs to be recomputed every so often for the annealing schedule
 
-                i = self.bootstrap_scheduler.t_to_index(times.cpu())
-                u = self.bootstrap_scheduler.sample_t(i - 1)
-                u = torch.clamp(u,min=self.epsilon_train).float().to(samples.device)
-                times = torch.clamp(times,min=self.epsilon_train).float().to(samples.device)
+                # i = self.bootstrap_scheduler.t_to_index(times.cpu())
+                # u = self.bootstrap_scheduler.sample_t(i - 1)
+                # u = torch.clamp(u,min=self.epsilon_train).float().to(samples.device)
+                # times = torch.clamp(times,min=self.epsilon_train).float().to(samples.device)
                 
-                u_samples = clean_samples + torch.randn_like(clean_samples) * self.noise_schedule.h(u).sqrt().unsqueeze(-1)
-                u_energy_est = self.energy_estimator(u_samples, u, 
-                                                     self.num_estimator_mc_samples, 
-                                                     reduction=True)
-                u_predicted_energy = self.net.forward_e(u, u_samples)
-                u_loss = (u_energy_est - u_predicted_energy).pow(2).sum(-1) / self.lambda_weighter(u)
+                # u_samples = clean_samples + torch.randn_like(clean_samples) * self.noise_schedule.h(u).sqrt().unsqueeze(-1)
+                # u_energy_est = self.energy_estimator(u_samples, u, 
+                #                                      self.num_estimator_mc_samples, 
+                #                                      reduction=True)
+                # u_predicted_energy = self.net.forward_e(u, u_samples)
+                # u_loss = (u_energy_est - u_predicted_energy).pow(2).sum(-1) / self.lambda_weighter(u)
             
-            bootstrap_index = torch.where(t_loss * (self.bootstrap_mc_samples -1) / self.bootstrap_mc_samples\
-                                         > u_loss)[0]
-            self.log(
-                "bootstrap_accept_rate",
-                bootstrap_index.shape[0] / t_loss.shape[0],
-                on_step=False,
-                on_epoch=True,
-                prog_bar=False,
-            )
-            self.log(
-                "u_loss",
-                u_loss.mean(),
-                on_step=False,
-                on_epoch=True,
-                prog_bar=True,
-            )
-            
-            bootstrap_energy_est = self.bootstrap_energy_estimator(samples[bootstrap_index], 
-                                                                   times[bootstrap_index], u[bootstrap_index], 
-                                                                     self.bootstrap_mc_samples,
-                                                                self.ema_model)
+            # bootstrap_index = torch.where(t_loss * (self.bootstrap_mc_samples -1) / self.bootstrap_mc_samples\
+            #                              > u_loss)[0]
+            # self.log(
+            #     "bootstrap_accept_rate",
+            #     bootstrap_index.shape[0] / t_loss.shape[0],
+            #     on_step=False,
+            #     on_epoch=True,
+            #     prog_bar=False,
+            # )
+            # self.log(
+            #     "u_loss",
+            #     u_loss.mean(),
+            #     on_step=False,
+            #     on_epoch=True,
+            #     prog_bar=True,
+            # )
+                
+            # bootstrap_energy_est = self.bootstrap_energy_estimator(samples, 
+            #                                                        times, u, 
+            #                                                          self.bootstrap_mc_samples,
+            #                                                     self.ema_model)
             energy_est_full = self.sum_energy_estimator(energy_est, 
                                                         self.num_estimator_mc_samples)
             
-            rand_index = torch.randint(0, self.num_estimator_mc_samples, 
-                                       (samples.shape[0], 
-                                        self.num_estimator_mc_samples - self.bootstrap_mc_samples))
-            energy_est = torch.stack([energy_est[i, rand_index[i]] for i in range(energy_est.shape[0])], dim=0)
-            bootstrap_energy_est = torch.cat([energy_est[bootstrap_index],
-                                              bootstrap_energy_est], 
-                                             dim=1)
-            energy_est_full[bootstrap_index] = self.sum_energy_estimator(bootstrap_energy_est,
-                                                                         self.num_estimator_mc_samples)
+            # rand_index = torch.randint(0, self.num_estimator_mc_samples, 
+            #                            (samples.shape[0], 
+            #                             self.num_estimator_mc_samples - self.bootstrap_mc_samples))
+            # energy_est = torch.stack([energy_est[i, rand_index[i]] for i in range(energy_est.shape[0])], dim=0)
+            # bootstrap_energy_est = torch.cat([energy_est,
+            #                                   bootstrap_energy_est], 
+            #                                  dim=1)
+            # energy_est_full = self.sum_energy_estimator(bootstrap_energy_est,
+            #                                                              self.num_estimator_mc_samples)
             energy_est = energy_est_full
         
         else:
         
             energy_est = self.sum_energy_estimator(energy_est, 
                                                    self.num_estimator_mc_samples)
-            
-        
         energy_clean = self.energy_function(clean_samples, smooth=True)
 
         predicted_energy_clean = self.net.forward_e(torch.zeros_like(times), 
@@ -436,7 +448,8 @@ class ENDEMLitModule(DEMLitModule):
         energy_error_norm = torch.abs(predicted_energy - energy_est).pow(2)
         error_norms_t0 = torch.abs(energy_clean - predicted_energy_clean).pow(2)
 
-        
+        continuous_loss = 2*predicted_energy*(time_derivative - self.noise_schedule.g(times)*trace_hessian).clone().detach()
+        continuous_loss = torch.abs(continuous_loss).pow(2)
         
         self.log(
                 "energy_loss_t0",
@@ -482,11 +495,24 @@ class ENDEMLitModule(DEMLitModule):
                 on_epoch=True,
                 prog_bar=False,
         )
+
+        # dim = samples.shape[1]  
+        # noised_samples = clean_samples + (torch.randn_like(clean_samples, device=samples.device) * self.noise_schedule.h(torch.ones_like(times)).sqrt().unsqueeze(-1))
+        # predicted_energy_t1 = self.net.forward_e(torch.ones_like(times), noised_samples)
+
+        # gaussian_samples = torch.randn((samples.shape[0], dim), device=samples.device)
+        # true_energy_t1 = 0.5 * (gaussian_samples ** 2).sum(dim=-1) + 0.5 * dim * torch.log(torch.tensor(2 * torch.pi, device=samples.device))
+
+        # loss_t1 = torch.abs(predicted_energy_t1 - true_energy_t1).pow(2)
+        # self.log("energy_loss_t1", loss_t1.mean(), on_step=True, on_epoch=True, prog_bar=False)
         
-        full_loss = (self.t0_regulizer_weight * error_norms_t0 + energy_error_norm).sum(-1)
-        if should_bootstrap:
-            full_loss += u_loss
-        
+        # full_loss = (self.t0_regulizer_weight * error_norms_t0 + energy_error_norm).sum(-1)
+
+        # if should_bootstrap:
+        full_loss = (continuous_loss).sum(-1)
+        # if should_bootstrap:
+        #     full_loss += u_loss
+
         return full_loss
     
     def integrate(

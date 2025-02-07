@@ -2,7 +2,6 @@ import torch
 import numpy as np
 from scipy.stats import entropy
 
-# Change to TimeSchedule
 class AnnealingSchedule:
     """
     Log-Normal Annealing Schedule for sampling times in training loop
@@ -27,8 +26,10 @@ class AnnealingSchedule:
 
         self.alpha = self.anneal_factor**self.beta
 
+        self.max_time = 0
+
         self.entropy = None
-        self.track_entropy = True
+        self.track_entropy = False
 
     def sample_t(self, batch_size: int) -> torch.Tensor:
 
@@ -39,10 +40,16 @@ class AnnealingSchedule:
         times_uniform = torch.rand((batch_size,))
 
         self.alpha = self.anneal_factor**self.beta
-
+            
         times = (1-self.alpha)*times_lognorm + self.alpha*times_uniform
 
-        self.entropy = self.get_entropy(times)
+        counts, bin_edges = np.histogram(times, bins=20, density=False)
+        self.max_time = max(bin_edges[:-1][counts > 10])    
+
+        if(self.anneal_factor == 1):
+            self.max_time = 1.0
+
+        # self.entropy = self.get_entropy(times)
 
         return times
     
@@ -56,7 +63,12 @@ class AnnealingSchedule:
 
         time = (1-(self.anneal_factor)**self.beta)*time_lognorm + (self.anneal_factor**self.beta)*time_uniform
 
-        self.entropy = self.get_entropy(time)
+        self.max_time = time
+
+        if(self.anneal_factor == 1):
+            self.max_time = 1.0
+
+        # self.entropy = self.get_entropy(time)
 
         return torch.zeros(batch_size) + time
 
