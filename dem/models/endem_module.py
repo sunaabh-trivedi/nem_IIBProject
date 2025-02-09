@@ -79,7 +79,7 @@ class ENDEMLitModule(DEMLitModule):
         ais_dt: float = 0.1,
         ais_warmup: int = 100,
         ema_beta=0.99,
-        t0_regulizer_weight=0.1,
+        t0_regulizer_weight=0.,
         bootstrap_schedule: BootstrapSchedule = None,
         bootstrap_warmup: int = 2e3,
         bootstrap_mc_samples: int = 80,
@@ -379,7 +379,7 @@ class ENDEMLitModule(DEMLitModule):
                 print("WandB logger not found!")
         
         bootstrap_stage = 1 if self.bootstrap_from_checkpoint else 0
-        
+        self.train_stage = 1  # placeholder, should remove it later
         should_bootstrap = (self.bootstrap_scheduler is not None and train and self.train_stage == bootstrap_stage)
         if should_bootstrap:
             self.iden_t = True
@@ -447,9 +447,9 @@ class ENDEMLitModule(DEMLitModule):
                                                     clean_samples)
         energy_error_norm = torch.abs(predicted_energy - energy_est).pow(2)
         error_norms_t0 = torch.abs(energy_clean - predicted_energy_clean).pow(2)
-
-        continuous_loss = 2*predicted_energy*(time_derivative - self.noise_schedule.g(times)*trace_hessian).clone().detach()
-        continuous_loss = torch.abs(continuous_loss).pow(2)
+        # continuous_loss = 2*predicted_energy.sum(-1)*(time_derivative - self.noise_schedule.g(times)*trace_hessian).clone().detach()
+        # continuous_loss = torch.abs(continuous_loss).pow(2)
+        continuous_loss = predicted_energy.sum(-1) ** 2 * (-time_derivative + self.noise_schedule.g(times)*trace_hessian).clone().detach()
         
         self.log(
                 "energy_loss_t0",
