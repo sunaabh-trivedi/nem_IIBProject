@@ -12,7 +12,17 @@ from dem.models.components.replay_buffer import ReplayBuffer
 from dem.utils.data_utils import remove_mean
 
 from bgflow import Energy
-from bgflow.utils import compute_distances
+# from bgflow.utils import compute_distances
+
+def compute_distances(x, n_particles, n_dimensions):
+    x = x.view(-1, n_particles, n_dimensions)
+    diff = x.unsqueeze(2) - x.unsqueeze(1)
+    squared_distances = (diff ** 2).sum(dim=-1)
+    indices = torch.triu_indices(n_particles, n_particles, offset=1)
+    pairwise_distances = squared_distances[:, indices[0], indices[1]]
+    pairwise_distances = torch.sqrt(pairwise_distances)
+
+    return pairwise_distances
 
 
 
