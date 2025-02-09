@@ -13,12 +13,13 @@ class EnergyNet(nn.Module):
     ):
         super(EnergyNet, self).__init__()
         self.is_molecule = energy_function.is_molecule
-        if self.is_molecule:
-            self.score_net = net(energy_function=energy_function, 
-                             add_virtual=False,
-                             energy=True)
-        else:
-            self.score_net = net(energy_function=energy_function)
+        # if self.is_molecule:
+            # self.score_net = net(energy_function=energy_function, 
+            #                  add_virtual=False,
+            #                  energy=True)
+        # else:
+        #     self.score_net = net(energy_function=energy_function)
+        self.score_net = net(energy_function=energy_function)
         self.energy_function = energy_function
         self.c = nn.Parameter(torch.tensor(0.0))
         self.noise_schedule = noise_schedule
@@ -26,25 +27,37 @@ class EnergyNet(nn.Module):
         self.score_clipper = None
 
     def forward_e(self, t, y, use_gt_score=True):
-        score = self.score_net(t, y)
-
-        if not self.energy_function.is_molecule:
-            energy = - torch.linalg.vector_norm(score, dim=-1) + score.sum(-1) + self.c
-            if use_gt_score:
-                return (1-t.unsqueeze(-1))*energy.unsqueeze(-1) + t.unsqueeze(-1)*self.energy_function(y)
-            else:
-                return energy.unsqueeze(-1)
+        # score = self.score_net(t, y)
+        # if not self.energy_function.is_molecule:
+        #     return (1-t.unsqueeze(-1)) * score.sum(-1, keepdim=True) + t.unsqueeze(-1) * self.energy_function(y)
+        # else:
+        #     return (1-t.unsqueeze(-1)) * score.view(-1, self.energy_function.n_particles, self.energy_function.n_spatial_dim).sum(-1) + t.unsqueeze(-1) * self.energy_function(y)
+        if self.energy_function.is_molecule:
+            score = self.score_net(t, y).view(-1, self.energy_function.n_particles, self.energy_function.n_spatial_dim)
         else:
-            score, potential = score
-            score = score.view(score.shape[0], 
-                               self.energy_function.n_particles,
-                               self.energy_function.n_spatial_dim)
-            potential = potential.view(score.shape[0], 
-                               self.energy_function.n_particles, -1)
-            if use_gt_score:
-                return (1-t.unsqueeze(-1))(- torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)) + t.unsqueeze(-1)*self.energy_function(y)
-            else:
-                return - torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)
+            score = self.score_net(t, y).view(-1, 1, y.shape[1])
+        if use_gt_score:
+            return (1-t.unsqueeze(-1)) * score.sum(-1) + t.unsqueeze(-1) * self.energy_function(y)
+        else:
+            return score.sum(-1)
+        # if not self.energy_function.is_molecule:
+        #     energy = - torch.linalg.vector_norm(score, dim=-1) + score.sum(-1) + self.c
+        #     if use_gt_score:
+        #         return (1-t.unsqueeze(-1))*energy.unsqueeze(-1) + t.unsqueeze(-1)*self.energy_function(y)
+        #     else:
+        #         return energy.unsqueeze(-1)
+        # else:
+            
+            # score, potential = score
+            # score = score.view(score.shape[0], 
+            #                    self.energy_function.n_particles,
+            #                    self.energy_function.n_spatial_dim)
+            # potential = potential.view(score.shape[0], 
+            #                    self.energy_function.n_particles, -1)
+            # if use_gt_score:
+            #     return (1-t.unsqueeze(-1))*(- torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)) + t.unsqueeze(-1)*self.energy_function(y)
+            # else:
+            #     return - torch.linalg.vector_norm(score, dim=-1) + potential.sum(-1)
 
     
     def forward(self, t: torch.Tensor, x: torch.Tensor, 
