@@ -447,9 +447,8 @@ class ENDEMLitModule(DEMLitModule):
                                                     clean_samples)
         energy_error_norm = torch.abs(predicted_energy - energy_est).pow(2)
         error_norms_t0 = torch.abs(energy_clean - predicted_energy_clean).pow(2)
-        # continuous_loss = 2*predicted_energy.sum(-1)*(time_derivative - self.noise_schedule.g(times)*trace_hessian).clone().detach()
+        continuous_loss = 2 * predicted_energy.sum(-1)*(time_derivative - self.noise_schedule.g(times)*trace_hessian).clone().detach()
         # continuous_loss = torch.abs(continuous_loss).pow(2)
-        continuous_loss = predicted_energy.sum(-1) ** 2 * (-time_derivative + self.noise_schedule.g(times)*trace_hessian).clone().detach()
         
         self.log(
                 "energy_loss_t0",
