@@ -501,7 +501,7 @@ class DEMLitModule(LightningModule):
                 else:
                     t = torch.rand([])
                     times = torch.zeros_like(times) + t
-
+                    
             if self.sample_noise:
                 noise_h = times ** 2 * self.noise_schedule.h(1)
                 noised_samples = iter_samples + (
@@ -514,6 +514,7 @@ class DEMLitModule(LightningModule):
                 noised_samples = iter_samples + (
                     torch.randn_like(iter_samples) * self.noise_schedule.h(times).sqrt().unsqueeze(-1)
                 )
+                # noised_samples = iter_samples + torch.sqrt(times).unsqueeze(-1)*(torch.randn_like(iter_samples).to(iter_samples.device)) # DPS forward process 
 
             if self.energy_function.is_molecule:
                 noised_samples = remove_mean(
@@ -569,6 +570,7 @@ class DEMLitModule(LightningModule):
                 prog_bar=True,
             )
 
+            torch.nn.utils.clip_grad_norm_(self.net.parameters(), max_norm=1.0)
             loss = loss + self.hparams.cfm_loss_weight * cfm_loss
         return loss
 

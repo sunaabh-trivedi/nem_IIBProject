@@ -60,6 +60,8 @@ class GMM(BaseEnergyFunction):
         self.n_particles = 1
 
         self.name = "gmm"
+
+        self.loc_scaling=loc_scaling
         
         super().__init__(
             dimensionality=dimensionality,
@@ -94,6 +96,14 @@ class GMM(BaseEnergyFunction):
         else:
             val_samples = self.gmm.sample((self.val_set_size,))
         return val_samples
+    
+    def marginal(self, kernel_std: torch.Tensor):
+        return self.gmm.marginal(kernel_std)
+
+    def marginal_log_prob(self, marginal_gmm, x: torch.Tensor):
+        if self.should_unnormalize:
+            x = self.unnormalize(x)
+        return marginal_gmm.log_prob(x).unsqueeze(-1)
 
     def __call__(self, samples: torch.Tensor, smooth=None) -> torch.Tensor:
         if self.should_unnormalize:
@@ -149,7 +159,7 @@ class GMM(BaseEnergyFunction):
                 ax.scatter(*latest_samples.detach().cpu().T)
 
                 wandb_logger.log_image(f"{prefix}generated_samples_scatter", [fig_to_image(fig)])
-                img = self.get_single_dataset_fig(latest_samples, "dem_generated_samples")
+                img = self.get_single_dataset_fig(latest_samples, "dem_generated_samples", plotting_bounds=(-2*self.loc_scaling, 2*self.loc_scaling))
                 wandb_logger.log_image(f"{prefix}generated_samples", [img])
 
             plt.close()

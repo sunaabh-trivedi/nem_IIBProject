@@ -4,9 +4,9 @@ dimensionality: 8
 n_particles: 4
 
 data_from_efm: true
-data_path: "data/test_split_DW4.npy"
-data_path_train: "data/train_split_DW4.npy"
-data_path_val: "data/val_split_DW4.npy"
+data_path: "C:\\Users\\tsuna\\Documents\\Uni\\IIB\\Project\\nem_IIBProject\\configs\\data\\test_split_DW4.npy"
+data_path_train: C:\\Users\\tsuna\\Documents\\Uni\\IIB\\Project\\nem_IIBProject\\configs\\data\\train_split_DW4.npy
+data_path_val: C:\\Users\\tsuna\\Documents\\Uni\\IIB\\Project\\nem_IIBProject\\configs\\data\\val_split_DW4.npy
 
 device: ${trainer.accelerator}
 

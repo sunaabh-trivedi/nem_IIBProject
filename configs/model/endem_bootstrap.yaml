@@ -16,9 +16,9 @@ scheduler:
 defaults:
   - net:
       - mlp
-  - time_schedule: annealing
+  - time_schedule: uniform
   - bootstrap_schedule: 
-      - annealing
+      - geometric
 
 lambda_weighter:
     _target_: dem.models.components.lambda_weighter.BasicLambdaWeighter
@@ -29,7 +29,7 @@ noise_schedule:
     _target_: dem.models.components.noise_schedules.GeometricNoiseSchedule
     sigma_min: 0.001
 
-bootstrap_from_checkpoint: True
+bootstrap_from_checkpoint: False
 
 ema_beta: 0.95
 

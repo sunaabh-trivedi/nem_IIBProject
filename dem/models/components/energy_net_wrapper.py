@@ -37,7 +37,7 @@ class EnergyNet(nn.Module):
         else:
             score = self.score_net(t, y).view(-1, 1, y.shape[1])
         if use_gt_score:
-            return (1-t.unsqueeze(-1)) * score.sum(-1) + t.unsqueeze(-1) * self.energy_function(y)
+            return t.unsqueeze(-1) * score.sum(-1) + (1-t.unsqueeze(-1)) * self.energy_function(y)
         else:
             return score.sum(-1)
         # if not self.energy_function.is_molecule:

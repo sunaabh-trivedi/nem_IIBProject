@@ -52,6 +52,7 @@ def euler_maruyama_step(
         drift = 2 * sigma_max **2 * lambda_k **2 / sde.noise_schedule.a(t, dt) * torch.norm(drift / dt, dim=-1)
     else:
         diffusion = diffusion_scale * sde.g(t, x) * np.sqrt(dt) * torch.randn_like(x)
+        # diffusion = diffusion_scale * 1/(torch.sqrt(1-t))*np.sqrt(dt)*torch.randn_like(x)
         x_next = x + drift + diffusion
     return x_next, drift
 
@@ -85,7 +86,7 @@ def integrate_sde(
     reverse_time: bool = True,
     diffusion_scale=1.0,
     no_grad=True,
-    time_range=1.0,
+    time_range=0.999,
     negative_time=False,
     num_negative_time_steps=100,
     var_preserve=False,
@@ -116,11 +117,11 @@ def integrate_sde(
                 x = remove_mean(x, energy_function.n_particles, energy_function.n_spatial_dim)
             if energy_function._can_normalize:
                 clip_range = [energy_function.normalization_min, energy_function.normalization_max]
-                #x = torch.clamp(x, -1.0, 1.0)
+                x = torch.clamp(x, -2.0, 2.0)
             else:
                 test_set = energy_function._val_set
                 clip_range = [torch.min(test_set), torch.max(test_set)]
-                #x = torch.clamp(x, clip_range[0], clip_range[1])
+                x = torch.clamp(x, clip_range[0], clip_range[1])
             samples.append(x)
 
     assert not torch.isnan(x0).any()
