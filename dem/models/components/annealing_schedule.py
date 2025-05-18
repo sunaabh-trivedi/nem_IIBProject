@@ -35,7 +35,7 @@ class AnnealingSchedule:
 
         log_times = self.log_mean_start + self.log_std_start*torch.randn((batch_size,))
         times_lognorm = torch.exp(log_times)
-        times_lognorm = torch.clamp(times_lognorm, min=0.0, max=1.0) # Is this a good idea?
+        times_lognorm = torch.clamp(times_lognorm, min=0.0, max=1.0)
         
         times_uniform = torch.rand((batch_size,))
 

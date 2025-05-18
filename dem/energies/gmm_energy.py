@@ -98,7 +98,7 @@ class GMM(BaseEnergyFunction):
         return val_samples
     
     def marginal(self, kernel_std: torch.Tensor):
-        return self.gmm.marginal(kernel_std)
+        return self.gmm.marginal(kernel_std, self.data_normalization_factor)
 
     def marginal_log_prob(self, marginal_gmm, x: torch.Tensor):
         if self.should_unnormalize:

@@ -13,6 +13,7 @@ from .components.energy_net_wrapper import EnergyNet
 from .components.score_estimator import log_expectation_reward, estimate_grad_Rt
 from .components.bootstrap_scheduler import BootstrapSchedule
 from .components.ema import EMA
+from fab.utils.plotting import plot_contours
 
 def remove_diag(x):
     assert x.shape[0] == x.shape[1]
@@ -166,7 +167,7 @@ class ENDEMLitModule(DEMLitModule):
             
             self.bootstrap_from_checkpoint = bootstrap_from_checkpoint
             self.time_schedule = time_schedule
-            self.log_residual = True
+            self.log_residual = False
             
     def forward(self, t: torch.Tensor, x: torch.Tensor, with_grad=False) -> torch.Tensor:
         """Perform a forward pass through the model `self.net`.
@@ -265,7 +266,7 @@ class ENDEMLitModule(DEMLitModule):
         
         return (energy_est - predicted_energy).pow(2)
     
-    def cbnem_loss(self, samples, times, num_hutchinson_samples=10):  # Increased from 10
+    def cbnem_loss(self, samples, times, num_hutchinson_samples=10):
         with torch.enable_grad():
             samples = samples.detach().requires_grad_(True)
             times = times.detach().requires_grad_(True)
@@ -287,180 +288,31 @@ class ENDEMLitModule(DEMLitModule):
             grad_E_norm_squared = torch.norm(grad_E, dim=-1).pow(2)
 
             # Hutchinson's trick
-            # trace_hessian = torch.zeros(samples.shape[0], device=samples.device)
-            # for _ in range(num_hutchinson_samples):
-            #     v = torch.randn_like(samples)  # Gaussian noise better than Rademacher for high-dim
-            #     Hv = torch.autograd.grad(
-            #         grad_E, samples, v,
-            #         retain_graph=True, create_graph=False 
-            #     )[0]
-            #     trace_hessian += (v * Hv).sum(dim=-1)
-            # trace_hessian /= num_hutchinson_samples
+            trace_hessian = torch.zeros(samples.shape[0], device=samples.device)
+            for _ in range(num_hutchinson_samples):
+                v = torch.randn_like(samples)  # Gaussian noise better than Rademacher for high-dim
+                Hv = torch.autograd.grad(
+                    grad_E, samples, v,
+                    retain_graph=True, create_graph=False 
+                )[0]
+                trace_hessian += (v * Hv).sum(dim=-1)
+            trace_hessian /= num_hutchinson_samples
 
-            trace_hessian = torch.sum(torch.autograd.grad(torch.sum(grad_E), samples, create_graph=True)[0], dim=-1)
-
-            loss_terms = (-time_derivative - 0.5 * self.noise_schedule.h(times) * (trace_hessian)).detach()
+            # PDE residual: - dE/dt + (sigma^2 / 2)*trace(Hessian(E)) 
+            #               + (sigma^2 / 2)*||grad(E)||^2 = 0
+            loss_terms = (
+                time_derivative
+                - 0.5 * self.noise_schedule.g(times) * trace_hessian
+                # + 0.5 * self.noise_schedule.g(times) * grad_E_norm_squared
+            )
             loss = (2 * predicted_energy * loss_terms)
-            self.log("train/loss", loss.mean(), on_step=False, on_epoch=True)
-        # self.log("train/predicted_energy", predicted_energy.mean())
-        # self.log("train/time_derivative", time_derivative.mean())
-        # self.log("train/trace_hessian", trace_hessian.mean())
-        # self.log("train/grad_E_norm_squared", grad_E_norm_squared.mean())
 
-        return loss
-
-    def dps_loss(self, samples, times, terminal_lambda=4.0):
-        def divergence_x(func, x_t, t):
-            """
-            Compute the divergence of func(x, t) w.r.t x.
-            Args:
-                func: A function that takes (x, t) and returns a vector field.
-                x_t: Input tensor (batch_size, dim).
-                t: Time tensor (batch_size, 1).
-            Returns:
-                divergence: Tensor of shape (batch_size, 1).
-            """
-            num = x_t.shape[0]  # Batch size
-
-            # Compute the sum of func(x, t) over the batch
-            func_sum = lambda x: torch.sum(func(x, t), axis=0)
-            # Compute the Jacobian of func_sum w.r.t. x_t
-            jacobian = torch.autograd.functional.jacobian(func_sum, x_t, create_graph=True).permute(1, 0, 2)
-            # Extract the diagonal elements of the Jacobian and sum them
-            divergence = torch.sum(jacobian.diagonal(offset=0, dim1=-1, dim2=-2), dim=-1, keepdim=False)
-            return divergence.reshape(num, 1)
-
-        with torch.enable_grad():
-            samples = samples.detach().requires_grad_(True)
-            times = times.detach().requires_grad_(True)
-
-            # Compute energy (returns -E)
-            predicted_energy = self.net.forward_e(times, samples)
-            
-            x_1 = torch.randn_like(samples).to(samples.device).requires_grad_(True)
-            score_1 = torch.autograd.grad(
-                self.net.forward_e(torch.ones_like(times), x_1), x_1,
-                grad_outputs=torch.ones_like(predicted_energy),
-                create_graph=True
-            )[0]
-
-            # Compute ∇(-E) = -∇E (score_net)
-            score_t = torch.autograd.grad(
-                predicted_energy, samples,
-                grad_outputs=torch.ones_like(predicted_energy),
-                create_graph=True
-            )[0]  # This is -∇E
-
-            # Compute time derivative using autograd.grad
-            time_derivative = torch.autograd.grad(
-                predicted_energy, times,
-                grad_outputs=torch.ones_like(predicted_energy),
-                retain_graph=True, create_graph=True
-            )[0]
-
-            # Compute divergence of score_t (div(score_t) = Tr(∇score_t))
-            # score_t is -∇E, so div(score_t) = -Tr(∇²E)
-            def score_t_fn(x, t):
-                return torch.autograd.grad(
-                    self.net.forward_e(t, x), x,
-                    grad_outputs=torch.ones_like(self.net.forward_e(t, x)),
-                    create_graph=True
-                )[0]
-
-            divergence = divergence_x(score_t_fn, samples, times)
-
-            # ---- Compute FPE Loss Terms ----
-            # Partial term I: 2*(1 - t) * ∂E/∂t (note: predicted_energy is -E)
-            partial_term_I = 2 * (1. - times) * (-time_derivative)
-
-            # Term II: (x + grad E) * grad E = - (samples - score_t) * score_t (since score_t = -grad E)
-            term_II = torch.sum((samples + score_t) * score_t, dim=1).reshape(samples.shape[0], 1)
-            partial_term_II = -divergence + term_II + samples.shape[-1]
-
-            # Compute Loss
-            loss_I = torch.mean(torch.norm((partial_term_I - partial_term_II), dim=1).pow(2))
-            # loss_I = torch.mean(predicted_energy*(partial_term_I - partial_term_II).clone().detach()) # This form of the loss causes issues -- Can correct by adding noise? (Probably not)
-            loss_II = torch.mean(torch.norm(score_1 + x_1, dim=1).pow(2))  # score_t is -grad E, so grad E = -score_t
-            loss = loss_I#  + terminal_lambda * loss_II
-
-            # ---- Logging ----
-            self.log("train/fpe_loss", loss.mean(), on_step=False, on_epoch=True)
-            self.log("train/fpe_loss_I", loss_I.mean(), on_step=False, on_epoch=True)
-            self.log("train/fpe_loss_II", loss_II.mean(), on_step=False, on_epoch=True)
-            self.log("train/trace_hessian", (-divergence).mean(), on_step=False, on_epoch=True)
-            self.log("train/grad_E_norm_squared", torch.norm(score_t, dim=-1).pow(2).mean(), on_step=False, on_epoch=True)
-
-        return loss
-        
-    def fpe_loss(self, samples, times, terminal_lambda=4.0):
-        def divergence_x(func, x_t, t):
-            num = x_t.shape[0]
-            func_sum = lambda x: torch.sum(func(x, t), axis=0)
-            jacobian = torch.autograd.functional.jacobian(func_sum, x_t, create_graph=True).permute(1, 0, 2)
-            divergence = torch.sum(jacobian.diagonal(offset=0, dim1=-1, dim2=-2), dim=-1, keepdim=False)
-            return divergence.reshape(num, 1)
-
-        with torch.enable_grad():
-            samples = samples.detach().requires_grad_(True)
-            times = times.detach().requires_grad_(True)
-
-            # Compute energy (u = -E)
-            predicted_energy = self.net.forward_e(times, samples)
-
-            # Compute ∇u (score_t = ∇u)
-            score_t = torch.autograd.grad(
-                predicted_energy, samples,
-                grad_outputs=torch.ones_like(predicted_energy),
-                create_graph=True
-            )[0]
-
-            # Compute time derivative (∂_t u)
-            time_derivative = torch.autograd.grad(
-                predicted_energy, times,
-                grad_outputs=torch.ones_like(predicted_energy),
-                retain_graph=True, create_graph=True
-            )[0]
-
-            # Compute divergence (Δu)
-            def score_t_fn(x, t):
-                return torch.autograd.grad(
-                    self.net.forward_e(t, x), x,
-                    grad_outputs=torch.ones_like(self.net.forward_e(t, x)),
-                    create_graph=True
-                )[0]
-            divergence = divergence_x(score_t_fn, samples, times)
-
-            # ---- Compute FPE Loss Terms ----
-            # LHS: ∂_t u
-            partial_term_I = 2*(1-times)*(-time_derivative)
-
-            # g_t = self.noise_schedule.h(times)
-
-            # RHS: 0.5 * g(t)^2 * (Δu + ||∇u||²)
-            term_II = torch.sum(score_t ** 2, dim=1, keepdim=True)
-            partial_term_II = -divergence + term_II
-
-            # Loss I: Enforce ∂_t u = 0.5 * g(t)^2 * (Δu + ||∇u||²)
-            loss_I = torch.mean(2*predicted_energy*(partial_term_I - partial_term_II).clone().detach())
-            # loss_I = torch.mean(torch.norm(partial_term_I - partial_term_II).pow(2))
-
-            # Loss II: Terminal condition (optional)
-            x_1 = torch.randn_like(samples).to(samples.device).requires_grad_(True)
-            score_1 = torch.autograd.grad(
-                self.net.forward_e(torch.ones_like(times), x_1),
-                x_1,
-                grad_outputs=torch.ones_like(predicted_energy),
-                create_graph=True
-            )[0]
-            loss_II = torch.mean(torch.norm(score_1 + x_1, dim=1).pow(2))
-            loss = loss_I# + terminal_lambda * loss_II
-
-            # Logging
-            self.log("train/fpe_loss", loss.mean(), on_step=False, on_epoch=True)
-            self.log("train/fpe_loss_I", loss_I.mean(), on_step=False, on_epoch=True)
-            self.log("train/fpe_loss_II", loss_II.mean(), on_step=False, on_epoch=True)
-            self.log("train/trace_hessian", divergence.mean(), on_step=False, on_epoch=True)
-            self.log("train/grad_E_norm_squared", torch.norm(score_t, dim=-1).pow(2).mean(), on_step=False, on_epoch=True)
+            # loss = torch.norm(loss_terms, dim=-1).pow(2).mean()
+        self.log("train/loss", loss.mean(), on_step=False, on_epoch=True)
+        # self.log("train/predicted_energy", predicted_energy.mean())sla
+        self.log("train/time_derivative", time_derivative.mean())
+        self.log("train/trace_hessian", trace_hessian.mean())
+        self.log("train/grad_E_norm_squared", grad_E_norm_squared.mean())
 
         return loss
     
@@ -473,8 +325,8 @@ class ENDEMLitModule(DEMLitModule):
             self.reverse_sde = VEReverseSDE(self.net, self.noise_schedule, 
                                             self.energy_function,self.net.MH_sample)
         
-        # energy_est = self.energy_estimator(samples, times, self.num_estimator_mc_samples).detach()
-        # predicted_energy = self.net.forward_e(times, samples)
+        energy_est = self.energy_estimator(samples, times, self.num_estimator_mc_samples).detach()
+        predicted_energy = self.net.forward_e(times, samples)
         
         # Log FPE residuals stratified by time
         if self.log_residual and self.global_step % 100 == 0:
@@ -538,11 +390,11 @@ class ENDEMLitModule(DEMLitModule):
             else:
                 print("WandB logger not found!")
         
-        bootstrap_stage = 1 if self.bootstrap_from_checkpoint else 0
-        self.train_stage = 1  # placeholder, should remove it later
-        should_bootstrap = (self.bootstrap_scheduler is not None and train and self.train_stage == bootstrap_stage)
-        if should_bootstrap:
-            self.iden_t = True
+        # bootstrap_stage = 1 if self.bootstrap_from_checkpoint else 0
+        # self.train_stage = 1  # placeholder, should remove it later
+        # should_bootstrap = (self.bootstrap_scheduler is not None and train and self.train_stage == bootstrap_stage)
+        # if should_bootstrap:
+        #     self.iden_t = True
         #     with torch.no_grad():
         #         t_loss = (self.sum_energy_estimator(energy_est, self.num_estimator_mc_samples) \
         #                   - predicted_energy).pow(2).sum(-1) * self.lambda_weighter(times)
@@ -583,8 +435,8 @@ class ENDEMLitModule(DEMLitModule):
         #                                                            times, u, 
         #                                                              self.bootstrap_mc_samples,
         #                                                         self.ema_model)
-            # energy_est_full = self.sum_energy_estimator(energy_est, 
-                                                        # self.num_estimator_mc_samples)
+        #     energy_est_full = self.sum_energy_estimator(energy_est, 
+        #                                                 self.num_estimator_mc_samples)
             
         #     rand_index = torch.randint(0, self.num_estimator_mc_samples, 
         #                                (samples.shape[0], 
@@ -595,48 +447,54 @@ class ENDEMLitModule(DEMLitModule):
         #                                      dim=1)
         #     energy_est_full = self.sum_energy_estimator(bootstrap_energy_est,
         #                                                                  self.num_estimator_mc_samples)
-            # energy_est = energy_est_full
+        #     energy_est = energy_est_full
         
         # else:
         
-            energy_est = self.sum_energy_estimator(energy_est, 
-                                                   self.num_estimator_mc_samples)
-        energy_clean = self.energy_function(clean_samples, smooth=True)
+        #     energy_est = self.sum_energy_estimator(energy_est, 
+        #                                            self.num_estimator_mc_samples)
+        # energy_clean = self.energy_function(clean_samples, smooth=True)
 
         # marginal_gmm = self.energy_function.marginal(self.noise_schedule.h(times).sqrt())
         # log_prob_marginal = self.energy_function.marginal_log_prob(marginal_gmm, clean_samples).unsqueeze(-1)
+
 
         # Plot marginal log probability and learned energy contours stratified by time
         if self.global_step % 5000 == 0:
             wandb_logger = get_wandb_logger(self.loggers)
             if wandb_logger:
-                # Generate a grid of points for the energy function
-                x = torch.linspace(-5, 5, 100, device=clean_samples.device)
-                y = torch.linspace(-5, 5, 100, device=clean_samples.device)
-                xx, yy = torch.meshgrid(x, y)
-                xy = torch.stack([xx.flatten(), yy.flatten()], dim=1).requires_grad_(True)
-
                 t_values = torch.tensor([0.0, 0.2, 0.5, 0.7, 0.8, 0.95, 0.99, 1.0], device=clean_samples.device)
-                fig, ax = plt.subplots(1, 2, figsize=(12, 6))
 
                 for t in t_values:
-                    # Compute the energy function at the grid points
-                    marginal_gmm = self.energy_function.marginal(self.noise_schedule.h(t).sqrt().unsqueeze(0))
-                    marginal_energy = self.energy_function.marginal_log_prob(marginal_gmm, xy).reshape(xx.shape)
+                    fig, ax = plt.subplots(1, 2, figsize=(12, 6))
+                    # Compute the marginal energy function
+                    # In ENDEMLitModule.get_loss (plotting section):
+                    marginal_gmm = self.energy_function.marginal(
+                        kernel_std=torch.tensor([self.noise_schedule.h(t).sqrt()], device=samples.device)
+                    )
 
-                    with torch.enable_grad():
-                    # Compute the learned energy function and its gradient at the grid points
-                        learned_energy = self.net.forward_e(t * torch.ones((xy.shape[0],), device=times.device), xy).reshape(xx.shape)
-                        # learned_energy_grad = torch.autograd.grad(learned_energy.sum(), xy, create_graph=True)[0]
+                    # Evaluate marginal log_prob in NORMALIZED space
+                    marginal_energy_func = lambda xy: marginal_gmm.log_prob(xy)
 
-                    # Plot contours
-                    ax[0].contour(xx.detach().cpu().numpy(), yy.detach().cpu().numpy(), marginal_energy.detach().cpu().numpy(), levels=100, cmap='viridis')
+                    # initial_samples = (1/self.energy_function.data_normalization_factor)*self.energy_function.gmm.sample((clean_samples.shape[0],))
+                    # Plot noised samples
+
+                    # noised_samples = initial_samples + torch.randn_like(clean_samples)*self.noise_schedule.h(t).sqrt()
+                    # print(f"t: {t}, samples: {noised_samples.max()}, noise: {self.noise_schedule.h(t).sqrt()}")
+
+                    # Adjusted: scale grid values to match the normalized space for learned energy evaluation.
+                    with torch.no_grad():
+                        learned_energy_func = lambda xy: self.net.forward_e(t * torch.ones((xy.shape[0],), device=times.device), xy)
+                    
+                    # Plot contours using plot_contours
+                    plot_contours(marginal_energy_func, ax=ax[0], bounds=(-1.4, 1.4), grid_width_n_points=100, n_contour_levels=100, device=clean_samples.device)
                     ax[0].set_title("Marginal Energy Contours")
                     ax[0].set_xlabel("x")
                     ax[0].set_ylabel("y")
                     ax[0].grid(True)
+                    # ax[0].scatter(noised_samples[:,0].detach().cpu().numpy(), noised_samples[:,1].detach().cpu().numpy(), color='r')
 
-                    ax[1].contour(xx.detach().cpu().numpy(), yy.detach().cpu().numpy(), learned_energy.detach().cpu().numpy(), levels=100, cmap='viridis')
+                    plot_contours(learned_energy_func, ax=ax[1], bounds=(-1.4, 1.4), grid_width_n_points=100, n_contour_levels=100, device=clean_samples.device)
                     ax[1].set_title("Learned Energy Contours")
                     ax[1].set_xlabel("x")
                     ax[1].set_ylabel("y")
@@ -647,22 +505,6 @@ class ENDEMLitModule(DEMLitModule):
                     wandb_logger.log_image(f"train/energy_contours_{t}", [image])
                     plt.close(fig)
 
-                    # learned_energy_grad_x = learned_energy_grad[:, 0].reshape(xx.shape)
-                    # learned_energy_grad_y = learned_energy_grad[:, 1].reshape(xx.shape)
-
-                    # # # Plot gradients using quiver
-                    # fig2, ax2 = plt.subplots(figsize=(6, 6))
-                    # ax2.quiver(xx.detach().cpu().numpy(), yy.detach().cpu().numpy(), learned_energy_grad_x.detach().cpu().numpy(), learned_energy_grad_y.detach().cpu().numpy(), color='red')
-                    # ax2.contour(xx.detach().cpu().numpy(), yy.detach().cpu().numpy(), learned_energy.detach().cpu().numpy(), levels=100, cmap='viridis')
-                    # ax2.set_title("Learned Energy Gradients")
-                    # ax2.set_xlabel("x")
-                    # ax2.set_ylabel("y")
-                    # ax2.grid(True)
-
-                    # image2 = fig_to_image(fig2)
-                    # wandb_logger.log_image(f"train/learned_energy_grad_{t}", [image2])
-                    # plt.close(fig2)
-
             else:
                 print("WandB logger not found!")
 
@@ -671,7 +513,7 @@ class ENDEMLitModule(DEMLitModule):
         # energy_error_norm = torch.abs(predicted_energy - energy_est).pow(2)
         # error_norms_t0 = torch.abs(energy_clean - predicted_energy_clean).pow(2)
 
-        continuous_loss = self.dps_loss(samples, times)
+        continuous_loss = self.cbnem_loss(samples, times)
         
         # self.log(
         #         "energy_loss_t0",
@@ -839,10 +681,10 @@ class ENDEMLitModule(DEMLitModule):
                     if param.grad is not None:
                         param_norm = torch.norm(param.grad).item()
                         total_norm += param_norm ** 2
-                        self.log(f"gradients/{name}", param_norm, on_step=False, on_epoch=True)
+                        # self.log(f"gradients/{name}", param_norm, on_step=False, on_epoch=True)
                 
                 total_norm = total_norm ** 0.5  # Compute total gradient norm
-                self.log("gradients/total_norm", total_norm, on_step=False, on_epoch=True)
+                # self.log("gradients/total_norm", total_norm, on_step=False, on_epoch=True)
 
     def compute_fpe_residual(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
 
