@@ -304,7 +304,7 @@ class ENDEMLitModule(DEMLitModule):
                 time_derivative
                 - 0.5 * self.noise_schedule.g(times) * trace_hessian
                 # + 0.5 * self.noise_schedule.g(times) * grad_E_norm_squared
-            )
+            ).clone().detach()
             loss = (2 * predicted_energy * loss_terms)
 
             # loss = torch.norm(loss_terms, dim=-1).pow(2).mean()
