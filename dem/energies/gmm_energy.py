@@ -12,6 +12,60 @@ from dem.models.components.replay_buffer import ReplayBuffer
 from dem.utils.logging_utils import fig_to_image
 
 
+class GMM_FAB(torch.nn.Module):
+    def __init__(self, dim, n_mixes, loc_scaling, log_var_scaling=0.1, seed=0,
+                 n_test_set_samples=1000, device="cpu"):
+        torch.nn.Module.__init__(self)
+        self.seed = seed
+        torch.manual_seed(self.seed)
+        self.n_mixes = n_mixes
+        self.n_test_set_samples = n_test_set_samples
+        mean = (torch.rand((n_mixes, dim)) - 0.5)*2 * loc_scaling
+        log_var = torch.ones((n_mixes, dim)) * log_var_scaling
+        self.register_buffer("cat_probs", torch.ones((n_mixes, )))
+        self.register_buffer("locs", mean)
+        self.register_buffer("scale_trils", torch.diag_embed(torch.nn.functional.softplus(log_var)))
+        self.device = device
+        self.to(self.device)
+        self.all_metric_plots = {
+            "marginal_pair": lambda samples, label, **kwargs: plt.scatter(samples[:, 0].detach().cpu(), samples[:, 1].detach().cpu(), label=label, **kwargs)
+        }
+
+    def to(self, device):
+        super().to(device)
+        self.device = device
+        return self
+    
+    @property
+    def distribution(self):
+        mix = torch.distributions.Categorical(self.cat_probs.to(self.device))
+        com = torch.distributions.MultivariateNormal(self.locs.to(self.device),
+                                                     scale_tril=self.scale_trils.to(self.device),
+                                                     validate_args=False)
+        return torch.distributions.MixtureSameFamily(mixture_distribution=mix,
+                                                     component_distribution=com,
+                                                     validate_args=False)
+    
+    @property
+    def test_set(self) -> torch.Tensor:
+        return self.sample((self.n_test_set_samples, ))
+    
+    def log_prob(self, x: torch.Tensor):
+        log_prob = self.distribution.log_prob(x)
+        mask = torch.zeros_like(log_prob)
+        mask[log_prob < -1e4] = - torch.tensor(float("inf"))
+        log_prob = log_prob + mask
+        return log_prob
+    
+    def sample(self, shape=(1,)):
+        return self.distribution.sample(shape)
+
+    # def plot_samples(self, samples_list: List[torch.Tensor], labels_list: List[str], metric_to_plot="marginal_pair", **kwargs):
+    #     for label, samples in zip(labels_list, samples_list):
+    #         if samples is None:
+    #             continue
+    #         self.all_metric_plots[metric_to_plot](samples, label, **kwargs)
+
 
 class GMM(BaseEnergyFunction):
     def __init__(
@@ -34,13 +88,14 @@ class GMM(BaseEnergyFunction):
     ):
         use_gpu = device != "cpu"
         torch.manual_seed(0)  # seed of 0 for GMM problem
-        self.gmm = gmm.GMM(
+        self.gmm = GMM_FAB(
             dim=dimensionality,
             n_mixes=n_mixes,
             loc_scaling=loc_scaling,
             log_var_scaling=log_var_scaling,
-            use_gpu=use_gpu,
-            true_expectation_estimation_n_samples=true_expectation_estimation_n_samples,
+            device=device,
+            # use_gpu=use_gpu,
+            # true_expectation_estimation_n_samples=true_expectation_estimation_n_samples,
         )
 
         self.curr_epoch = 0
@@ -110,10 +165,6 @@ class GMM(BaseEnergyFunction):
             samples = self.unnormalize(samples)
         return self.gmm.log_prob(samples).unsqueeze(-1)
 
-    @property
-    def dimensionality(self):
-        return 2
-
     def log_on_epoch_end(
         self,
         latest_samples: torch.Tensor,
@@ -156,11 +207,20 @@ class GMM(BaseEnergyFunction):
 
             if latest_samples is not None:
                 fig, ax = plt.subplots()
-                ax.scatter(*latest_samples.detach().cpu().T)
+                if self.dimensionality >= 2:
+                    ax.scatter(*latest_samples.detach().cpu()[:, :2].T, label="model", alpha=0.5)
+                    ax.scatter(*self.sample_train_set(latest_samples.shape[0]).detach().cpu()[:, :2].T, label="gt", alpha=0.5)
+                    ax.legend()
 
-                wandb_logger.log_image(f"{prefix}generated_samples_scatter", [fig_to_image(fig)])
-                img = self.get_single_dataset_fig(latest_samples, "dem_generated_samples", plotting_bounds=(-2*self.loc_scaling, 2*self.loc_scaling))
-                wandb_logger.log_image(f"{prefix}generated_samples", [img])
+                    wandb_logger.log_image(f"{prefix}generated_samples_scatter", [fig_to_image(fig)])
+                    if self.dimensionality == 2:
+                        img = self.get_single_dataset_fig(latest_samples.detach().cpu(), "dem_generated_samples", plotting_bounds=(-2*self.loc_scaling, 2*self.loc_scaling))
+                        wandb_logger.log_image(f"{prefix}generated_samples", [img])
+                else:
+                    ax.hist(latest_samples.detach().cpu().flatten(), bins=100, label="model", alpha=0.5, density=True)
+                    ax.hist(self.sample_train_set(latest_samples.shape[0]).detach().cpu().flatten(), bins=100, label="gt", alpha=0.5, density=True)
+                    ax.legend()
+                    wandb_logger.log_image(f"{prefix}generated_samples_scatter", [fig_to_image(fig)])
 
             plt.close()
 
