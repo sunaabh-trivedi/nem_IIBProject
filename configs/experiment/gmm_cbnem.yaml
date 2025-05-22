@@ -37,8 +37,13 @@ model:
     max_score_norm: 70.
 
   optimizer:
-    lr: 1e-3
+    lr: 1e-5
 
   # this has to be max 1000 since test_set is 1000
   eval_batch_size: 1000
   scheduler: null
+  use_buffer: true
+
+trainer:
+  # max_epochs: 1000
+  gradient_clip_val: 0.1
