@@ -85,7 +85,7 @@ compile: false
 use_richardsons: false
 
 cfm_loss_weight: 1.0
-use_ema: true
+use_ema: false
 use_exact_likelihood: True
 num_efficient_samples: 0  # 0 for using exact gradient computation for scores, >0 for approximation
 
