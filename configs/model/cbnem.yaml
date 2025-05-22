@@ -114,4 +114,4 @@ nll_with_cfm: false
 debug_use_train_data: false
 logz_with_cfm: false
 
-tangent_normalization: true
+tangent_normalization: false
