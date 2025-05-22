@@ -115,3 +115,5 @@ debug_use_train_data: false
 logz_with_cfm: false
 
 tangent_normalization: false
+debug_with_pinn_loss: false
+num_hutchinson_samples: 1

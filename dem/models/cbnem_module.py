@@ -79,6 +79,8 @@ class CBNEMLitModule(DEMLitModule):
         num_efficient_samples=0,
         bootstrap_from_checkpoint=True,
         tangent_normalization=False,
+        num_hutchinson_samples=1,
+        debug_with_pinn_loss=False
     ) -> None:
             
             net = partial(EnergyNet, net=net, 
@@ -158,6 +160,8 @@ class CBNEMLitModule(DEMLitModule):
             self.time_schedule = time_schedule
             self.log_residual = False
             self.tangent_normalization = tangent_normalization
+            self.num_hutchinson_samples = num_hutchinson_samples
+            self.debug_with_pinn_loss = debug_with_pinn_loss
             
     def forward(self, t: torch.Tensor, x: torch.Tensor, with_grad=False) -> torch.Tensor:
         """Perform a forward pass through the model `self.net`.
@@ -187,8 +191,7 @@ class CBNEMLitModule(DEMLitModule):
     def sum_energy_estimator(self, e, num_samples):
         return torch.logsumexp(e, dim=1) - torch.log(torch.tensor(num_samples)).to(e.device)
     
-
-    def cbnem_loss(self, samples, times, num_hutchinson_samples=1):
+    def get_derivatives(self, samples, times, num_hutchinson_samples=1):
         with torch.enable_grad():
             samples = samples.detach().requires_grad_(True)
             times = times.detach().requires_grad_(True)
@@ -207,29 +210,65 @@ class CBNEMLitModule(DEMLitModule):
                 create_graph=True, 
             )[0]
 
-            grad_E_norm_squared = torch.norm(grad_E, dim=-1).pow(2)
-
-            # Hutchinson's trick
-            trace_hessian = torch.zeros(samples.shape[0], device=samples.device)
-            for _ in range(num_hutchinson_samples):
-                v = torch.randn_like(samples)  # Gaussian noise better than Rademacher for high-dim
-                Hv = torch.autograd.grad(
-                    grad_E, samples, v,
-                    retain_graph=True, create_graph=False 
+            if num_hutchinson_samples >= 1:
+                trace_hessian = torch.zeros(samples.shape[0], device=samples.device)
+                for _ in range(num_hutchinson_samples):
+                    v = torch.randn_like(samples)  # Gaussian noise better than Rademacher for high-dim
+                    Hv = torch.autograd.grad(
+                        grad_E, samples, v,
+                        retain_graph=True, create_graph=False 
+                    )[0]
+                    trace_hessian += (v * Hv).sum(dim=-1)
+                trace_hessian /= num_hutchinson_samples
+            else:
+                trace_hessian = torch.autograd.grad(
+                    grad_E, samples, 
+                    grad_outputs=torch.ones_like(grad_E),
+                    retain_graph=True,
+                    create_graph=False
                 )[0]
-                trace_hessian += (v * Hv).sum(dim=-1)
-            trace_hessian /= num_hutchinson_samples
+                trace_hessian = trace_hessian.sum(dim=-1)
 
-            # PDE residual: - dE/dt + (sigma^2 / 2)*trace(Hessian(E)) 
-            #               + (sigma^2 / 2)*||grad(E)||^2 = 0
-            loss_terms = (
-                time_derivative
-                - 0.5 * self.noise_schedule.g(times) * trace_hessian
-                - 0.5 * self.noise_schedule.g(times) * grad_E_norm_squared
-            ).unsqueeze(-1).clone().detach()
-            if self.tangent_normalization:
-                loss_terms = loss_terms / (loss_terms.norm(dim=-1, keepdim=True) + 1e-6)
-            loss = (2 * predicted_energy * loss_terms)
+        return time_derivative, grad_E, trace_hessian
+    
+    def pinn_loss(self, samples, times, num_hutchinson_samples=1):
+        
+        time_derivative, grad_E, trace_hessian = self.get_derivatives(samples, times, num_hutchinson_samples)
+        grad_E_norm_squared = torch.norm(grad_E, dim=-1).pow(2)
+        
+        # PDE residual: - dE/dt + (sigma^2 / 2)*trace(Hessian(E)) 
+        #               + (sigma^2 / 2)*||grad(E)||^2 = 0
+        loss_terms = (
+            time_derivative
+            - 0.5 * self.noise_schedule.g(times) * trace_hessian
+            - 0.5 * self.noise_schedule.g(times) * grad_E_norm_squared
+        )
+        loss = loss_terms.pow(2).mean()
+
+        self.log("train/loss", loss.mean(), on_step=False, on_epoch=True)
+        # self.log("train/predicted_energy", predicted_energy.mean())
+        self.log("train/time_derivative", time_derivative.mean())
+        self.log("train/trace_hessian", trace_hessian.mean())
+        self.log("train/grad_E_norm_squared", grad_E_norm_squared.mean())
+
+        return loss
+    
+    def cbnem_loss(self, samples, times, num_hutchinson_samples=1):
+
+        predicted_energy = self.net.forward_e(times, samples)
+        time_derivative, grad_E, trace_hessian = self.get_derivatives(samples, times, num_hutchinson_samples)
+        grad_E_norm_squared = torch.norm(grad_E.detach(), dim=-1).pow(2)
+
+        # PDE residual: - dE/dt + (sigma^2 / 2)*trace(Hessian(E)) 
+        #               + (sigma^2 / 2)*||grad(E)||^2 = 0
+        loss_terms = (
+            time_derivative
+            - 0.5 * self.noise_schedule.g(times) * trace_hessian
+            - 0.5 * self.noise_schedule.g(times) * grad_E_norm_squared
+        ).unsqueeze(-1).clone().detach()
+        if self.tangent_normalization:
+            loss_terms = loss_terms / (loss_terms.norm(dim=-1, keepdim=True) + 1e-6)
+        loss = (2 * predicted_energy * loss_terms)
 
         self.log("train/loss", loss.mean(), on_step=False, on_epoch=True)
         # self.log("train/predicted_energy", predicted_energy.mean())
@@ -273,8 +312,10 @@ class CBNEMLitModule(DEMLitModule):
             self.reverse_sde = VEReverseSDE(self.net, self.noise_schedule, 
                                             self.energy_function,None)
             
-
-        continuous_loss = self.cbnem_loss(samples, times)
+        if self.debug_with_pinn_loss:
+            continuous_loss = self.pinn_loss(samples, times, num_hutchinson_samples=self.num_hutchinson_samples)
+        else:
+            continuous_loss = self.cbnem_loss(samples, times, num_hutchinson_samples=self.num_hutchinson_samples)
         # continuous_loss = self.cbnem_loss_v2(samples, times)
         
         # self.log(
