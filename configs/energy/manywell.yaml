@@ -1,6 +1,6 @@
 _target_: dem.energies.many_well_energy.ManyWellEnergy
 
-dimensionality: 8
+dimensionality: 32
 
 plot_samples_epoch_period: 1
 data_normalization_factor: 1.0
